@@ -1,0 +1,11 @@
+{
+	"id": "add-alias-plugin",
+	"name": "AddAliasPlugin",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"author": "",
+	"authorUrl": "",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}
