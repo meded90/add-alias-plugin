@@ -2,10 +2,12 @@ import { App, Plugin, PluginSettingTab, Setting, Notice, TFile } from 'obsidian'
 
 interface AddAliasPluginSettings {
 	openaiApiKey: string;
+	maxContentLength: number;
 }
 
 const DEFAULT_SETTINGS: AddAliasPluginSettings = {
 	openaiApiKey: '',
+	maxContentLength: 2000, // Максимальное количество символов содержимого
 };
 
 export default class AddAliasPlugin extends Plugin {
@@ -39,8 +41,20 @@ export default class AddAliasPlugin extends Plugin {
 			return;
 		}
 		
-		// Получаем склонения с помощью OpenAI API
-		const aliasesArray = await this.getDeclensions(title);
+		// Получаем содержимое файла
+		let fileContent = await this.app.vault.read(activeFile);
+		
+		// Удаляем YAML метаданные из содержимого
+		fileContent = fileContent.replace(/^---\n[\s\S]*?\n---\n/, '');
+		
+		// Ограничиваем длину содержимого
+		const maxContentLength = this.settings.maxContentLength;
+		if (fileContent.length > maxContentLength) {
+			fileContent = fileContent.substring(0, maxContentLength);
+		}
+		
+		// Получаем алиасы с помощью OpenAI API, передавая название и содержимое
+		const aliasesArray = await this.getAliases(title, fileContent);
 		
 		if (aliasesArray && aliasesArray.length > 0) {
 			await this.updateFrontMatter(activeFile, aliasesArray);
@@ -50,8 +64,16 @@ export default class AddAliasPlugin extends Plugin {
 		}
 	}
 	
-	async getDeclensions(title: string): Promise<string[]> {
-		const prompt = `Составь все возможные формы склонения для названия "${title}" и верни их в формате JSON массива строк или в виде одной строки, где формы разделены запятыми. Не добавляй никакой дополнительной информации. Пример: ["форма1", "форма2", "форма3"] или "форма1, форма2, форма3".`;
+	async getAliases(title: string, content: string): Promise<string[]> {
+		// Новый промпт, включающий название и содержимое файла
+		const prompt = `На основе следующего текста заметки предложи возможные алиасы основанные на 1) синонимах и склонения и альтернативные названия Заголовок заметки 2) другие термины описанные в данной заметки 3) названия на английском языке. Возвращай ответ в формате JSON массива строк или в виде одной строки, где алиасы разделены запятыми. Не добавляй никакой дополнительной информации.
+
+Заголовок заметки: "${title}"
+
+Содержимое заметки:
+${content}
+
+Пример ответа: ["алиас1", "алиас2", "алиас3"] или "алиас1, алиас2, алиас3".`;
 		
 		try {
 			const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -61,11 +83,11 @@ export default class AddAliasPlugin extends Plugin {
 					'Authorization': `Bearer ${this.settings.openaiApiKey}`,
 				},
 				body: JSON.stringify({
-					model: 'gpt-3.5-turbo',
+					model: 'gpt-4o-mini',
 					messages: [
 						{
 							role: 'system',
-							content: 'Вы опытный лингвист, который помогает создавать формы склонения слов. Возвращайте только запрошенные данные в нужном формате без дополнительного текста.',
+							content: 'Вы опытный лингвист и эксперт по семантике, который помогает создавать релевантные алиасы для заметок. Возвращайте только запрошенные данные в нужном формате JSON без дополнительного текста.',
 						},
 						{
 							role: 'user',
@@ -73,32 +95,34 @@ export default class AddAliasPlugin extends Plugin {
 						},
 					],
 					max_tokens: 200,
-					temperature: 0,
+					temperature: 0.7, // Повышаем температуру для большей вариативности
 				}),
 			});
 			
-			const data = await response.json();
-			
-			if (response.ok) {
-				let content = data.choices[0].message.content.trim();
-				
-				let aliasesArray: string[] = [];
-				
-				// Попробуем распарсить как JSON
-				try {
-					aliasesArray = JSON.parse(content);
-				} catch (e) {
-					// Если не получилось, попробуем разделить строку по запятым
-					aliasesArray = content.split(',').map((s: string) => s.trim());
-				}
-				
-				return aliasesArray;
-			} else {
-				console.error('Ошибка OpenAI API:', data);
+			if (!response.ok) {
+				const errorData = await response.json();
+				console.error('Ошибка OpenAI API:', errorData);
+				new Notice(`Ошибка OpenAI API: ${errorData.error.message}`);
 				return [];
 			}
+			
+			const data = await response.json();
+			let content = data.choices[0].message.content.trim();
+			
+			let aliasesArray: string[] = [];
+			
+			// Попробуем распарсить как JSON
+			try {
+				aliasesArray = JSON.parse(content);
+			} catch (e) {
+				// Если не получилось, попробуем разделить строку по запятым
+				aliasesArray = content.split(',').map((s: string) => s.trim());
+			}
+			
+			return aliasesArray;
 		} catch (error) {
 			console.error('Ошибка при обращении к OpenAI API:', error);
+			new Notice('Ошибка при обращении к OpenAI API. Проверьте подключение к интернету.');
 			return [];
 		}
 	}
@@ -166,6 +190,22 @@ class AddAliasSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.openaiApiKey = value.trim();
 						await this.plugin.saveSettings();
+					})
+			);
+		
+		new Setting(containerEl)
+			.setName('Максимальная длина содержимого')
+			.setDesc('Максимальное количество символов содержимого заметки, передаваемого в OpenAI API')
+			.addText((text) =>
+				text
+					.setPlaceholder('2000')
+					.setValue(this.plugin.settings.maxContentLength.toString())
+					.onChange(async (value) => {
+						const num = parseInt(value);
+						if (!isNaN(num) && num > 0) {
+							this.plugin.settings.maxContentLength = num;
+							await this.plugin.saveSettings();
+						}
 					})
 			);
 	}
